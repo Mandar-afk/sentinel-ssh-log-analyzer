@@ -4,7 +4,8 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Iterable
+import ipaddress
+from typing import Iterable, Optional
 
 from .parser import Event
 
@@ -15,11 +16,32 @@ class Thresholds:
     usernames: int = 5
     sources: int = 5
     window_minutes: int = 10
+    cidr_ipv4: Optional[int] = None
+    cidr_ipv6: Optional[int] = None
 
     def validate(self):
         for name in ("failures", "usernames", "sources", "window_minutes"):
             if getattr(self, name) < 1:
                 raise ValueError(f"{name.replace('_', ' ')} must be at least 1")
+        if self.cidr_ipv4 is not None and not (1 <= self.cidr_ipv4 <= 32):
+            raise ValueError("cidr ipv4 prefix must be between 1 and 32")
+        if self.cidr_ipv6 is not None and not (1 <= self.cidr_ipv6 <= 128):
+            raise ValueError("cidr ipv6 prefix must be between 1 and 128")
+
+
+def _network_key(ip_str: str, cidr_v4: Optional[int], cidr_v6: Optional[int]) -> str:
+    """Return the CIDR subnet string if prefix is configured, else original IP."""
+    if cidr_v4 is None and cidr_v6 is None:
+        return ip_str
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        if ip.version == 4 and cidr_v4 is not None:
+            return str(ipaddress.ip_network(f"{ip_str}/{cidr_v4}", strict=False))
+        if ip.version == 6 and cidr_v6 is not None:
+            return str(ipaddress.ip_network(f"{ip_str}/{cidr_v6}", strict=False))
+    except ValueError:
+        pass
+    return ip_str
 
 
 def _evidence(events: Iterable[Event]):
@@ -64,14 +86,15 @@ def detect(events: Iterable[Event], thresholds: Thresholds = Thresholds()):
     successes_by_ip_user = defaultdict(list)
     ip_users, user_ips = defaultdict(list), defaultdict(list)
     for event in ordered:
-        ip_users[event.source_ip].append(event)
+        source_key = _network_key(event.source_ip, thresholds.cidr_ipv4, thresholds.cidr_ipv6)
+        ip_users[source_key].append(event)
         user_ips[event.username].append(event)
         if event.outcome == "failure":
-            failures_by_ip[event.source_ip].append(event)
-            failures_by_ip_user[(event.source_ip, event.username)].append(event)
+            failures_by_ip[source_key].append(event)
+            failures_by_ip_user[(source_key, event.username)].append(event)
         else:
-            successes_by_ip[event.source_ip].append(event)
-            successes_by_ip_user[(event.source_ip, event.username)].append(event)
+            successes_by_ip[source_key].append(event)
+            successes_by_ip_user[(source_key, event.username)].append(event)
 
     # 1. Repeated failures: use qualifying rolling window to avoid tumbling window splits
     for ip, failures in failures_by_ip.items():
@@ -138,8 +161,8 @@ def detect(events: Iterable[Event], thresholds: Thresholds = Thresholds()):
     # 5. Single username targeted from multiple sources
     for username, activity in user_ips.items():
         for activity_window in _qualifying_rolling_windows(
-                activity, window, lambda batch: len({e.source_ip for e in batch}) >= thresholds.sources):
-            sources = sorted({e.source_ip for e in activity_window})
+                activity, window, lambda batch: len({_network_key(e.source_ip, thresholds.cidr_ipv4, thresholds.cidr_ipv6) for e in batch}) >= thresholds.sources):
+            sources = sorted({_network_key(e.source_ip, thresholds.cidr_ipv4, thresholds.cidr_ipv6) for e in activity_window})
             if len(sources) >= thresholds.sources:
                 alert = {"type": "multiple_sources", "severity": "medium", "username": username,
                          "count": len(sources), "source_ips": sources,

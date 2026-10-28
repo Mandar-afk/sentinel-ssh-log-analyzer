@@ -11,6 +11,7 @@ from unittest.mock import patch
 from sentinel.cli import main
 from sentinel.detector import Thresholds, detect
 from sentinel.parser import parse_line, parse_lines
+from sentinel.report import render_html
 
 
 FIXTURE = Path(__file__).parent / "data" / "auth.log"
@@ -209,8 +210,66 @@ class DetectionTests(unittest.TestCase):
             by_type[alert["type"]] = by_type.get(alert["type"], 0) + 1
         self.assertEqual(by_type, {"multiple_sources": 1, "multiple_usernames": 1})
 
+    def test_cidr_aggregation_detects_distributed_subnet_attack(self):
+        no_cidr_alerts = detect(self.events, Thresholds(failures=5, window_minutes=10))
+        alice_rep_no_cidr = [a for a in no_cidr_alerts if a["type"] == "repeated_failures" and "198.51.100" in a.get("source_ip", "")]
+        self.assertEqual(len(alice_rep_no_cidr), 0)
+
+        cidr_alerts = detect(self.events, Thresholds(failures=5, cidr_ipv4=24, window_minutes=10))
+        alice_rep_cidr = [a for a in cidr_alerts if a["type"] == "repeated_failures" and a.get("source_ip") == "198.51.100.0/24"]
+        self.assertEqual(len(alice_rep_cidr), 1)
+        self.assertEqual(alice_rep_cidr[0]["count"], 5)
+
 
 class CliTests(unittest.TestCase):
+    def test_html_report_rendering(self):
+        from sentinel.report import make_report
+        with FIXTURE.open(encoding="utf-8") as log:
+            events, malformed = parse_lines(log, year=2026)
+        alerts = detect(events, Thresholds(failures=4))
+        report = make_report(events, alerts, malformed, str(FIXTURE))
+        html_output = render_html(report)
+        self.assertIn("<!DOCTYPE html>", html_output)
+        self.assertIn("Step-by-Step Incident Investigation Guide", html_output)
+        self.assertIn(str(FIXTURE), html_output)
+        self.assertIn("prefers-color-scheme: light", html_output)
+
+    def test_cli_html_format(self):
+        from io import StringIO
+        import contextlib
+        out = StringIO()
+        with contextlib.redirect_stdout(out):
+            result = main([str(FIXTURE), "--format", "html", "--year", "2026"])
+        self.assertEqual(result, 0)
+        self.assertIn("<!DOCTYPE html>", out.getvalue())
+        self.assertIn("Sentinel Security Investigation Report", out.getvalue())
+
+    def test_web_server_handler(self):
+        from sentinel.cli import _SentinelReportHandler, serve_report
+        from unittest.mock import patch
+        import contextlib
+        import io
+
+        class DummyServer:
+            def __init__(self, address, handler):
+                if address != ("127.0.0.1", 8123):
+                    raise AssertionError(f"unexpected server bind address: {address}")
+                self.address = address
+                self.handler = handler
+                self.closed = False
+
+            def serve_forever(self):
+                pass
+
+            def server_close(self):
+                self.closed = True
+
+        output = io.StringIO()
+        with patch("sentinel.cli.http.server.HTTPServer", DummyServer), contextlib.redirect_stdout(output):
+            serve_report("<html>Sentinel Interactive Test</html>", port=8123)
+        self.assertEqual(_SentinelReportHandler.html_content, b"<html>Sentinel Interactive Test</html>")
+        self.assertIn("127.0.0.1:8123", output.getvalue())
+
     def test_cli_exit_code_flag(self):
         from io import StringIO
         import contextlib

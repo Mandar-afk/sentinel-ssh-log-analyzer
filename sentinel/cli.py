@@ -2,17 +2,24 @@
 import argparse
 from contextlib import nullcontext
 import gzip
+import http.server
 import sys
 
 from .detector import Thresholds, detect
 from .parser import parse_lines
-from .report import make_report, render_json, render_terminal
+from .report import make_report, render_html, render_json, render_terminal
 
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="sentinel", description="Analyze Linux SSH authentication logs")
     parser.add_argument("logfile", help="path to an auth.log or secure log")
-    parser.add_argument("--format", choices=("text", "json"), default="text", help="report format")
+    parser.add_argument("--format", choices=("text", "json", "html"), default="text", help="report format")
+    parser.add_argument("--serve", nargs="?", const=8080, type=int, default=None, metavar="PORT",
+                        help="start local web server to view report (default port: 8080)")
+    parser.add_argument("--cidr-v4", type=int, default=None, metavar="PREFIX",
+                        help="aggregate IPv4 sources by CIDR prefix (e.g. 24)")
+    parser.add_argument("--cidr-v6", type=int, default=None, metavar="PREFIX",
+                        help="aggregate IPv6 sources by CIDR prefix (e.g. 64)")
     parser.add_argument("--failures", type=int, default=5, help="failed events to flag (default: 5)")
     parser.add_argument("--usernames", type=int, default=5, help="distinct usernames per source (default: 5)")
     parser.add_argument("--sources", type=int, default=5, help="distinct sources per username (default: 5)")
@@ -22,6 +29,36 @@ def build_parser():
     parser.add_argument("--min-severity", choices=("low", "medium", "high"), default=None, help="minimum alert severity to report")
     parser.add_argument("--rules", default=None, help="comma-separated alert types to include (e.g. repeated_failures,spray_success)")
     return parser
+
+
+class _SentinelReportHandler(http.server.BaseHTTPRequestHandler):
+    html_content = b""
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(self.html_content)))
+        self.end_headers()
+        self.wfile.write(self.html_content)
+
+    def log_message(self, format, *args):
+        # Quiet standard request access logs.
+        pass
+
+
+def serve_report(html_text: str, port: int = 8080):
+    """Serve the interactive HTML report on 127.0.0.1 until terminated."""
+    handler = _SentinelReportHandler
+    handler.html_content = html_text.encode("utf-8")
+    server = http.server.HTTPServer(("127.0.0.1", port), handler)
+    print(f"Sentinel Interactive Report running at http://127.0.0.1:{port}/")
+    print("Serving locally. Press Ctrl+C to stop.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nStopping Sentinel web server.")
+    finally:
+        server.server_close()
 
 
 def open_log(source):
@@ -38,8 +75,11 @@ def open_log(source):
 def main(argv=None):
     args = build_parser().parse_args(argv)
     try:
-        thresholds = Thresholds(args.failures, args.usernames, args.sources, args.window)
+        thresholds = Thresholds(args.failures, args.usernames, args.sources, args.window,
+                                cidr_ipv4=args.cidr_v4, cidr_ipv6=args.cidr_v6)
         thresholds.validate()
+        if args.serve is not None and not 1 <= args.serve <= 65535:
+            raise ValueError("serve port must be between 1 and 65535")
         if args.year is not None and not 1970 <= args.year <= 9998:
             raise ValueError("year must be between 1970 and 9998")
         with open_log(args.logfile) as log:
@@ -57,7 +97,20 @@ def main(argv=None):
         alerts = [a for a in alerts if a.get("type") in allowed_rules]
 
     report = make_report(events, alerts, malformed, args.logfile)
-    print(render_json(report) if args.format == "json" else render_terminal(report))
+    if args.serve is not None:
+        try:
+            serve_report(render_html(report), port=args.serve)
+        except OSError as exc:
+            print(f"sentinel: {exc}", file=sys.stderr)
+            return 2
+        return 0
+
+    if args.format == "json":
+        print(render_json(report))
+    elif args.format == "html":
+        print(render_html(report))
+    else:
+        print(render_terminal(report))
     if args.exit_code and len(report["alerts"]) > 0:
         return 1
     return 0

@@ -1,0 +1,137 @@
+{
+  "alerts": [
+    {
+      "count": 5,
+      "evidence": [
+        {
+          "event_type": "failed_password",
+          "line": 9,
+          "outcome": "failure",
+          "source_ip": "198.51.100.21",
+          "time": "2026-10-28T03:35:00",
+          "username": "alice"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 10,
+          "outcome": "failure",
+          "source_ip": "198.51.100.22",
+          "time": "2026-10-28T03:36:00",
+          "username": "alice"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 11,
+          "outcome": "failure",
+          "source_ip": "198.51.100.23",
+          "time": "2026-10-28T03:37:00",
+          "username": "alice"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 12,
+          "outcome": "failure",
+          "source_ip": "198.51.100.24",
+          "time": "2026-10-28T03:38:00",
+          "username": "alice"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 13,
+          "outcome": "failure",
+          "source_ip": "198.51.100.25",
+          "time": "2026-10-28T03:39:00",
+          "username": "alice"
+        }
+      ],
+      "severity": "medium",
+      "source_ips": [
+        "198.51.100.21",
+        "198.51.100.22",
+        "198.51.100.23",
+        "198.51.100.24",
+        "198.51.100.25"
+      ],
+      "summary": "Username alice was targeted from 5 distinct sources within 10 minutes",
+      "total_count": 5,
+      "type": "multiple_sources",
+      "username": "alice",
+      "window_end": "2026-10-28T03:39:00",
+      "window_minutes": 10,
+      "window_start": "2026-10-28T03:35:00"
+    },
+    {
+      "count": 7,
+      "evidence": [
+        {
+          "event_type": "failed_password_invalid_user",
+          "line": 1,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:30:00",
+          "username": "admin"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 2,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:31:00",
+          "username": "root"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 3,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:32:00",
+          "username": "deploy"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 4,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:33:00",
+          "username": "admin"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 5,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:33:10",
+          "username": "deploy"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 6,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:33:20",
+          "username": "deploy"
+        },
+        {
+          "event_type": "failed_password",
+          "line": 7,
+          "outcome": "failure",
+          "source_ip": "203.0.113.10",
+          "time": "2026-10-28T03:33:30",
+          "username": "deploy"
+        }
+      ],
+      "severity": "high",
+      "source_ip": "203.0.113.10",
+      "summary": "7 failed authentication events from 203.0.113.10 within 10 minutes",
+      "total_count": 7,
+      "type": "repeated_failures",
+      "window_end": "2026-10-28T03:33:30",
+      "window_minutes": 10,
+      "window_start": "2026-10-28T03:30:00"
+    }
+  ],
+  "assessment": "Suspicious indicators require investigation; they are not proof of compromise.",
+  "events_parsed": 14,
+  "malformed_lines": 1,
+  "source": "tests/data/auth.log"
+}
