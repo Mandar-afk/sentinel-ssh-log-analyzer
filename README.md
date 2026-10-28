@@ -20,27 +20,32 @@ Run directly without installation using `python -m sentinel`; after installation
 python -m sentinel tests/data/auth.log --year 2026
 python -m sentinel /var/log/auth.log --format json > report.json
 python -m sentinel /var/log/secure --failures 8 --usernames 6 --sources 6 --window 15
+zcat /var/log/auth.log.2.gz | python -m sentinel - --format json
 ```
 
-For traditional syslog timestamps the year is not present in the source line. Sentinel uses the current year unless `--year` is supplied. Timestamps with an explicit timezone are converted to UTC; timezone-naive timestamps are interpreted in the machine's local timezone and also converted to UTC. Event timestamps are stored as naive UTC values and ordered by timestamp, then source line number. Detection windows use elapsed timestamp differences.
+For traditional syslog timestamps the year is not present in the source line. Sentinel uses the current year unless `--year` is supplied, then advances the parsing year on a December-to-January transition. ISO timestamps accept fractional seconds and explicit offsets. Timestamps with an explicit timezone are converted to UTC; timezone-naive timestamps are interpreted in the machine's local timezone and also converted to UTC. Event timestamps are stored as naive UTC values and ordered by timestamp, then source line number. Detection windows use elapsed timestamp differences. Pass `-` to read standard input; filenames ending in `.gz` are decompressed while reading.
 
 Options:
 
 - `--format text|json`: readable terminal output (default) or machine-readable JSON.
 - `--failures N`: failed events from one IP in the rolling window needed for a repeated-failure alert (default 5).
-- `--window MINUTES`: rolling window for repeated failures and success-after-failures (default 10).
+- `--window MINUTES`: rolling window used by all time-based detection rules (default 10).
 - `--usernames N`: distinct usernames seen from one IP needed for an alert (default 5).
 - `--sources N`: distinct source IPs seen for one username needed for an alert (default 5).
 - `--year YYYY`: year for traditional syslog timestamps.
+- `--exit-code`: exit with code 1 if any suspicious activity alerts are detected.
+- `--min-severity {low,medium,high}`: filter out alerts below the specified severity.
+- `--rules RULE1,RULE2`: include only the listed alert types, such as `repeated_failures,spray_success`.
 
 ## Detection rules
 
-1. **Repeated failures:** at least `--failures` failed authentication events from one source occur within a rolling `--window` interval.
-2. **Success after failures:** a success from the same source follows at least `--failures` failures in the preceding rolling interval. Evidence includes the prior failures and the success.
-3. **One source, multiple usernames:** at least `--usernames` distinct names appear in parsed auth events from a source during the input log.
-4. **Multiple sources, one username:** at least `--sources` distinct IPs appear for a username during the input log.
+1. **Repeated failures:** at least `--failures` failed authentication events from one source occur in a rolling `--window` interval. Qualifying intervals produce separate alerts without duplicate overlap.
+2. **Success after failures:** a success from the same source and username follows at least `--failures` matching failures in the preceding rolling interval. Each qualifying success produces an alert.
+3. **One source, multiple usernames:** at least `--usernames` distinct names appear in a source's rolling `--window` interval.
+4. **Multiple sources, one username:** at least `--sources` distinct IPs appear for a username in a rolling `--window` interval.
+5. **Password spray success:** a success from an IP follows at least `--failures` failures across at least `--usernames` distinct usernames within `--window` minutes.
 
-Every alert includes supporting event time, IP, username, outcome, event type, and input line number. Thresholds count parsed events; username/source diversity rules cover the full input file, while failure rules use the configured rolling interval.
+Every alert includes supporting event time, IP, username, outcome, event type, and input line number. Evidence arrays contain at most 20 records (the first 10 and last 10) and include a `total_count` for the full evidence set. Thresholds count parsed events. Paired `Invalid user` and `Failed password for invalid user` records with identical timestamp, PID, source, and username are counted once.
 
 ## Validation
 

@@ -23,9 +23,33 @@ class Thresholds:
 
 
 def _evidence(events: Iterable[Event]):
-    return [{"time": e.timestamp.isoformat(), "source_ip": e.source_ip,
+    samples = list(events)
+    evidence = [{"time": e.timestamp.isoformat(), "source_ip": e.source_ip,
              "username": e.username, "outcome": e.outcome,
-             "event_type": e.event_type, "line": e.line_number} for e in events]
+             "event_type": e.event_type, "line": e.line_number} for e in samples]
+    if len(evidence) > 20:
+        evidence = evidence[:10] + evidence[-10:]
+    return evidence, len(samples)
+
+
+def _alert_evidence(alert, events):
+    alert["evidence"], alert["total_count"] = _evidence(events)
+    return alert
+
+
+def _qualifying_rolling_windows(events, window, predicate):
+    """Yield qualifying rolling windows, advancing past each emitted window."""
+    start = 0
+    while start < len(events):
+        end = start + 1
+        while end < len(events) and events[end].timestamp - events[start].timestamp <= window:
+            end += 1
+        candidate = events[start:end]
+        if predicate(candidate):
+            yield candidate
+            start = end
+        else:
+            start += 1
 
 
 def detect(events: Iterable[Event], thresholds: Thresholds = Thresholds()):
@@ -35,56 +59,93 @@ def detect(events: Iterable[Event], thresholds: Thresholds = Thresholds()):
     alerts = []
     window = timedelta(minutes=thresholds.window_minutes)
     failures_by_ip = defaultdict(list)
-    failures_by_user = defaultdict(list)
+    failures_by_ip_user = defaultdict(list)
     successes_by_ip = defaultdict(list)
+    successes_by_ip_user = defaultdict(list)
     ip_users, user_ips = defaultdict(list), defaultdict(list)
     for event in ordered:
         ip_users[event.source_ip].append(event)
         user_ips[event.username].append(event)
         if event.outcome == "failure":
             failures_by_ip[event.source_ip].append(event)
-            failures_by_user[event.username].append(event)
+            failures_by_ip_user[(event.source_ip, event.username)].append(event)
         else:
             successes_by_ip[event.source_ip].append(event)
+            successes_by_ip_user[(event.source_ip, event.username)].append(event)
 
+    # 1. Repeated failures: use qualifying rolling window to avoid tumbling window splits
     for ip, failures in failures_by_ip.items():
-        # Sliding windows, anchored at each event; emit once per source using the strongest window.
-        best = []
-        left = 0
-        for right, event in enumerate(failures):
-            while event.timestamp - failures[left].timestamp > window:
-                left += 1
-            candidate = failures[left:right + 1]
-            if len(candidate) > len(best):
-                best = candidate
-        if len(best) >= thresholds.failures:
-            alerts.append({"type": "repeated_failures", "severity": "high", "source_ip": ip,
-                           "count": len(best), "window_minutes": thresholds.window_minutes,
-                           "summary": f"{len(best)} failed authentication events from {ip} within {thresholds.window_minutes} minutes",
-                           "evidence": _evidence(best)})
+        for failure_window in _qualifying_rolling_windows(
+                failures, window, lambda batch: len(batch) >= thresholds.failures):
+            alert = {"type": "repeated_failures", "severity": "high", "source_ip": ip,
+                     "count": len(failure_window), "window_minutes": thresholds.window_minutes,
+                     "summary": f"{len(failure_window)} failed authentication events from {ip} within {thresholds.window_minutes} minutes",
+                     "window_start": failure_window[0].timestamp.isoformat(),
+                     "window_end": failure_window[-1].timestamp.isoformat()}
+            alerts.append(_alert_evidence(alert, failure_window))
+
+        # 2. Success after failures for the same user (deduplicating rapid subsequent sessions)
+        for username in {user for source, user in successes_by_ip_user if source == ip}:
+            user_failures = failures_by_ip_user[(ip, username)]
+            last_alerted_success = None
+            for success in successes_by_ip_user[(ip, username)]:
+                success_key = (success.timestamp, success.line_number)
+                prior = [f for f in user_failures
+                         if (f.timestamp, f.line_number) < success_key
+                         and success.timestamp - f.timestamp <= window
+                         and (last_alerted_success is None or (f.timestamp, f.line_number) > last_alerted_success)]
+                if len(prior) < thresholds.failures:
+                    continue
+                alert = {"type": "success_after_failures", "severity": "high", "source_ip": ip,
+                         "username": username, "count": len(prior), "window_minutes": thresholds.window_minutes,
+                         "summary": f"Successful authentication for {username} from {ip} followed {len(prior)} matching failures within {thresholds.window_minutes} minutes",
+                         "window_start": prior[0].timestamp.isoformat(),
+                         "window_end": success.timestamp.isoformat()}
+                alerts.append(_alert_evidence(alert, prior + [success]))
+                last_alerted_success = success_key
+
+        # 3. Password spray success: multiple usernames failed from source before a success
         for success in successes_by_ip.get(ip, []):
             success_key = (success.timestamp, success.line_number)
-            prior = [f for f in failures
-                     if (f.timestamp, f.line_number) < success_key and success.timestamp - f.timestamp <= window]
-            if len(prior) >= thresholds.failures:
-                alerts.append({"type": "success_after_failures", "severity": "high", "source_ip": ip,
-                               "username": success.username, "count": len(prior), "window_minutes": thresholds.window_minutes,
-                               "summary": f"Successful authentication from {ip} followed {len(prior)} failures within {thresholds.window_minutes} minutes",
-                               "evidence": _evidence(prior + [success])})
+            spray_failures = [f for f in failures
+                              if (f.timestamp, f.line_number) < success_key
+                              and success.timestamp - f.timestamp <= window]
+            spray_users = {f.username for f in spray_failures}
+            if len(spray_failures) >= thresholds.failures and len(spray_users) >= thresholds.usernames:
+                alert = {"type": "spray_success", "severity": "high", "source_ip": ip,
+                         "username": success.username, "count": len(spray_failures),
+                         "usernames_targeted": sorted(spray_users),
+                         "window_minutes": thresholds.window_minutes,
+                         "summary": f"Successful authentication for {success.username} from {ip} followed {len(spray_failures)} spray failures across {len(spray_users)} usernames within {thresholds.window_minutes} minutes",
+                         "window_start": spray_failures[0].timestamp.isoformat(),
+                         "window_end": success.timestamp.isoformat()}
+                alerts.append(_alert_evidence(alert, spray_failures + [success]))
                 break
 
+    # 4. Multiple usernames attempted from one source
     for ip, activity in ip_users.items():
-        usernames = sorted({e.username for e in activity})
-        if len(usernames) >= thresholds.usernames:
-            alerts.append({"type": "multiple_usernames", "severity": "medium", "source_ip": ip,
-                           "count": len(usernames), "usernames": usernames,
-                           "summary": f"Source {ip} attempted {len(usernames)} distinct usernames",
-                           "evidence": _evidence(activity)})
+        for activity_window in _qualifying_rolling_windows(
+                activity, window, lambda batch: len({e.username for e in batch}) >= thresholds.usernames):
+            usernames = sorted({e.username for e in activity_window})
+            if len(usernames) >= thresholds.usernames:
+                alert = {"type": "multiple_usernames", "severity": "medium", "source_ip": ip,
+                         "count": len(usernames), "usernames": usernames,
+                         "window_minutes": thresholds.window_minutes,
+                         "summary": f"Source {ip} attempted {len(usernames)} distinct usernames within {thresholds.window_minutes} minutes",
+                         "window_start": activity_window[0].timestamp.isoformat(),
+                         "window_end": activity_window[-1].timestamp.isoformat()}
+                alerts.append(_alert_evidence(alert, activity_window))
+    # 5. Single username targeted from multiple sources
     for username, activity in user_ips.items():
-        sources = sorted({e.source_ip for e in activity})
-        if len(sources) >= thresholds.sources:
-            alerts.append({"type": "multiple_sources", "severity": "medium", "username": username,
-                           "count": len(sources), "source_ips": sources,
-                           "summary": f"Username {username} was targeted from {len(sources)} distinct sources",
-                           "evidence": _evidence(activity)})
+        for activity_window in _qualifying_rolling_windows(
+                activity, window, lambda batch: len({e.source_ip for e in batch}) >= thresholds.sources):
+            sources = sorted({e.source_ip for e in activity_window})
+            if len(sources) >= thresholds.sources:
+                alert = {"type": "multiple_sources", "severity": "medium", "username": username,
+                         "count": len(sources), "source_ips": sources,
+                         "window_minutes": thresholds.window_minutes,
+                         "summary": f"Username {username} was targeted from {len(sources)} distinct sources within {thresholds.window_minutes} minutes",
+                         "window_start": activity_window[0].timestamp.isoformat(),
+                         "window_end": activity_window[-1].timestamp.isoformat()}
+                alerts.append(_alert_evidence(alert, activity_window))
     return sorted(alerts, key=lambda a: (a["type"], a.get("source_ip", a.get("username", ""))))

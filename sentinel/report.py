@@ -19,7 +19,8 @@ def render_terminal(report):
     if not report["alerts"]:
         lines.append("No configured suspicious patterns detected.")
     for alert in report["alerts"]:
-        lines.extend([f"\n[{alert['severity'].upper()}] {alert['type']}: {alert['summary']}", "Evidence:"])
+        lines.extend([f"\n[{alert['severity'].upper()}] {alert['type']}: {alert['summary']}",
+                      f"Evidence: {alert['total_count']} records ({len(alert['evidence'])} shown)"])
         for item in alert["evidence"]:
             lines.append(f"  line {item['line']}: {item['time']} {item['source_ip']} {item['outcome']} {item['username']} ({item['event_type']})")
     lines.append(f"\n{report['assessment']}")
